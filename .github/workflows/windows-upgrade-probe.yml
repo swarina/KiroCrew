@@ -47,16 +47,28 @@ jobs:
             return $out
           }
 
+          # electron-builder keeps InstallLocation under <hive>\Software\<uninstall key name>,
+          # as .github/scripts/test-windows-installer.ps1 reads it.
           function Get-Registration {
-            Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
-              Where-Object { $_.DisplayName -like "Kiro*Crew*" } |
-              Select-Object DisplayName, DisplayVersion, InstallLocation, PSPath
+            foreach ($hive in @("HKCU", "HKLM")) {
+              foreach ($e in Get-ItemProperty "${hive}:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue) {
+                if ($e.DisplayName -notlike "Kiro*Crew*") { continue }
+                $install = Get-ItemProperty -LiteralPath "${hive}:\Software\$($e.PSChildName)" -ErrorAction SilentlyContinue
+                [pscustomobject]@{
+                  DisplayName = $e.DisplayName
+                  DisplayVersion = $e.DisplayVersion
+                  InstallLocation = if ($install) { $install.InstallLocation } else { $null }
+                  Hive = $hive
+                }
+              }
+            }
           }
 
           function Report([string]$label) {
             $reg = @(Get-Registration)
             "[$label] registrations: $($reg.Count)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
             foreach ($r in $reg) {
+              if (-not $r.InstallLocation) { throw "[$label] $($r.DisplayName) in $($r.Hive) has no InstallLocation" }
               $exe = Join-Path $r.InstallLocation "KiroCrew.exe"
               $pv = if (Test-Path -LiteralPath $exe) { (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion } else { "<missing exe>" }
               "[$label] $($r.DisplayName) DisplayVersion=$($r.DisplayVersion) ProductVersion=$pv at $($r.InstallLocation)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
