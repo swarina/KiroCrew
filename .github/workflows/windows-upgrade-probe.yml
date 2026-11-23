@@ -16,13 +16,19 @@ permissions:
 jobs:
   upgrade:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        from: ["0.11.2", "0.12.2", "0.13.0"]
-        to: ["0.13.1"]
-        temp: ["default", "long"]
+        include:
+          # The pair the bug-bash ran on 2026-11-10/11, when 0.12.1 was stable.
+          - { from: "0.11.2", to: "0.12.1", temp: "default" }
+          - { from: "0.11.2", to: "0.12.1", temp: "user25" }
+          # 0.12.1 ships the deep lark_oapi cache #36067 describes.
+          - { from: "0.12.1", to: "0.13.1", temp: "default" }
+          - { from: "0.12.1", to: "0.13.1", temp: "user25" }
+          - { from: "0.11.2", to: "0.13.1", temp: "user25" }
+          - { from: "0.13.0", to: "0.13.1", temp: "user25" }
     steps:
       - name: Upgrade ${{ matrix.from }} to ${{ matrix.to }} (TEMP ${{ matrix.temp }})
         shell: pwsh
@@ -31,12 +37,13 @@ jobs:
           $evidence = Join-Path $env:RUNNER_TEMP "evidence"
           New-Item -ItemType Directory -Force -Path $evidence | Out-Null
 
-          if ("${{ matrix.temp }}" -eq "long") {
-            # A long user profile lengthens the uninstaller's %TEMP% move target.
-            $longTemp = Join-Path $env:LOCALAPPDATA ("T" + ("x" * 40) + "\Temp")
-            New-Item -ItemType Directory -Force -Path $longTemp | Out-Null
-            $env:TEMP = $longTemp; $env:TMP = $longTemp
+          if ("${{ matrix.temp }}" -eq "user25") {
+            # %TEMP% as a 25-character user name has it; the uninstaller moves files under it.
+            $userTemp = "C:\Users\" + ("u" * 25) + "\AppData\Local\Temp"
+            New-Item -ItemType Directory -Force -Path $userTemp | Out-Null
+            $env:TEMP = $userTemp; $env:TMP = $userTemp
           }
+          "TEMP: $($env:TEMP) ($($env:TEMP.Length) chars)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
 
           function Get-Installer([string]$v) {
             $name = "KiroCrew-$v-Setup-x64.exe"
@@ -84,21 +91,45 @@ jobs:
           $before = @(Report "before")
           if ($before.Count -ne 1) { throw "expected one registration after the old install" }
 
+          $root = $before[0].InstallLocation.TrimEnd("\")
+          $deepest = Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 3
+          foreach ($f in $deepest) {
+            # The old uninstaller moves each file to %TEMP%\nsXXXX.tmp\old-install\<relative path>.
+            $target = $env:TEMP.Length + "\nsXXXX.tmp\old-install".Length + ($f.FullName.Length - $root.Length)
+            "deepest (old tree): $($f.FullName.Length) chars, move target ~$target chars: $($f.FullName)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
+          }
+
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          $p = Start-Process -FilePath $new -ArgumentList "--updated", "/S" -Wait -PassThru
+          $p = Start-Process -FilePath $new -ArgumentList "--updated", "/S" -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(600000)) {
+            "update HUNG after 600 s" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
+            Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -like "*KiroCrew*" -or $_.ExecutablePath -like "*\ns*.tmp\*" -or $_.Name -like "Un_*" -or $_.Name -like "*Setup*") } |
+              ForEach-Object { "process: $($_.ProcessId) parent=$($_.ParentProcessId) $($_.Name) $($_.CommandLine)" } | Tee-Object -Append "$evidence\summary.txt" | Out-Host
+            Get-Process | Where-Object { $_.MainWindowTitle } |
+              ForEach-Object { "window: $($_.Id) $($_.ProcessName) '$($_.MainWindowTitle)'" } | Tee-Object -Append "$evidence\summary.txt" | Out-Host
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $b = [Windows.Forms.SystemInformation]::VirtualScreen
+              $bmp = New-Object Drawing.Bitmap $b.Width, $b.Height
+              [Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
+              $bmp.Save("$evidence\hung-desktop.png")
+            } catch { "screenshot failed: $_" | Tee-Object -Append "$evidence\summary.txt" | Out-Host }
+            Get-ChildItem -Path $env:TEMP -Recurse -Filter "*.log" -ErrorAction SilentlyContinue | Copy-Item -Destination $evidence -ErrorAction SilentlyContinue
+            & taskkill /PID $p.Id /T /F | Out-Host
+            throw "update hung"
+          }
           "update exit: $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds) s" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
           $after = @(Report "after")
+          if ($after.Count -ne 1) { throw "expected one registration after the update; found $($after.Count) (update exit $($p.ExitCode))" }
 
           $stranded = Get-ChildItem -Path $env:TEMP -Filter "ns*.tmp" -Directory -ErrorAction SilentlyContinue |
             Where-Object { Test-Path (Join-Path $_.FullName "old-install") }
           "stranded old-install dirs in TEMP: $(@($stranded).Count)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
 
-          $deepest = Get-ChildItem -LiteralPath $before[0].InstallLocation -Recurse -File -ErrorAction SilentlyContinue |
-            Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 5
-          foreach ($f in $deepest) { "deepest: $($f.FullName.Length) $($f.FullName)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host }
-
           $pv = (Get-Item -LiteralPath (Join-Path $after[0].InstallLocation "KiroCrew.exe")).VersionInfo.ProductVersion
-          if (-not $pv.StartsWith("${{ matrix.to }}")) { throw "REPRODUCED: ProductVersion is $pv after updating to ${{ matrix.to }}" }
+          if (-not $pv.StartsWith("${{ matrix.to }}")) { throw "REPRODUCED: ProductVersion is $pv after updating to ${{ matrix.to }} (update exit $($p.ExitCode))" }
 
       - name: Upload evidence
         if: always()
