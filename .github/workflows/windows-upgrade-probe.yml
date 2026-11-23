@@ -1,0 +1,94 @@
+# Throwaway probe for kirodotdev/KiroCrew#35055. Lives only on swarina/KiroCrew
+# (branch probe/35055-windows-upgrade), never in a PR to upstream.
+# Replays the Windows update handoff electron-updater 6.x performs on quit:
+# the new NSIS installer run over the existing install with `--updated /S`,
+# which first runs the OLD version's uninstaller.
+name: probe-35055-windows-upgrade
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        from: ["0.11.2", "0.12.2", "0.13.0"]
+        to: ["0.13.1"]
+        temp: ["default", "long"]
+    steps:
+      - name: Upgrade ${{ matrix.from }} to ${{ matrix.to }} (TEMP ${{ matrix.temp }})
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $evidence = Join-Path $env:RUNNER_TEMP "evidence"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+
+          if ("${{ matrix.temp }}" -eq "long") {
+            # A long user profile lengthens the uninstaller's %TEMP% move target.
+            $longTemp = Join-Path $env:LOCALAPPDATA ("T" + ("x" * 40) + "\Temp")
+            New-Item -ItemType Directory -Force -Path $longTemp | Out-Null
+            $env:TEMP = $longTemp; $env:TMP = $longTemp
+          }
+
+          function Get-Installer([string]$v) {
+            $name = "KiroCrew-$v-Setup-x64.exe"
+            $out = Join-Path $env:RUNNER_TEMP $name
+            Invoke-WebRequest "https://github.com/kirodotdev/KiroCrew/releases/download/v$v/$name" -OutFile $out
+            $sig = Get-AuthenticodeSignature $out
+            "$name signature: $($sig.Status) $($sig.SignerCertificate.Subject)" | Tee-Object -Append "$evidence\summary.txt"
+            return $out
+          }
+
+          function Get-Registration {
+            Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue |
+              Where-Object { $_.DisplayName -like "Kiro*Crew*" } |
+              Select-Object DisplayName, DisplayVersion, InstallLocation, PSPath
+          }
+
+          function Report([string]$label) {
+            $reg = @(Get-Registration)
+            "[$label] registrations: $($reg.Count)" | Tee-Object -Append "$evidence\summary.txt"
+            foreach ($r in $reg) {
+              $exe = Join-Path $r.InstallLocation "KiroCrew.exe"
+              $pv = if (Test-Path -LiteralPath $exe) { (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion } else { "<missing exe>" }
+              "[$label] $($r.DisplayName) DisplayVersion=$($r.DisplayVersion) ProductVersion=$pv at $($r.InstallLocation)" | Tee-Object -Append "$evidence\summary.txt"
+            }
+            return $reg
+          }
+
+          $old = Get-Installer "${{ matrix.from }}"
+          $new = Get-Installer "${{ matrix.to }}"
+
+          $p = Start-Process -FilePath $old -ArgumentList "/S" -Wait -PassThru
+          "old install exit: $($p.ExitCode)" | Tee-Object -Append "$evidence\summary.txt"
+          $before = @(Report "before")
+          if ($before.Count -ne 1) { throw "expected one registration after the old install" }
+
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $p = Start-Process -FilePath $new -ArgumentList "--updated", "/S" -Wait -PassThru
+          "update exit: $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds) s" | Tee-Object -Append "$evidence\summary.txt"
+          $after = @(Report "after")
+
+          $stranded = Get-ChildItem -Path $env:TEMP -Filter "ns*.tmp" -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.FullName "old-install") }
+          "stranded old-install dirs in TEMP: $(@($stranded).Count)" | Tee-Object -Append "$evidence\summary.txt"
+
+          $deepest = Get-ChildItem -LiteralPath $before[0].InstallLocation -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 5
+          foreach ($f in $deepest) { "deepest: $($f.FullName.Length) $($f.FullName)" | Tee-Object -Append "$evidence\summary.txt" }
+
+          $pv = (Get-Item -LiteralPath (Join-Path $after[0].InstallLocation "KiroCrew.exe")).VersionInfo.ProductVersion
+          if (-not $pv.StartsWith("${{ matrix.to }}")) { throw "REPRODUCED: ProductVersion is $pv after updating to ${{ matrix.to }}" }
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-${{ matrix.from }}-${{ matrix.to }}-${{ matrix.temp }}
+          path: ${{ runner.temp }}/evidence
