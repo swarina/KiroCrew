@@ -43,7 +43,7 @@ jobs:
             $out = Join-Path $env:RUNNER_TEMP $name
             Invoke-WebRequest "https://github.com/kirodotdev/KiroCrew/releases/download/v$v/$name" -OutFile $out
             $sig = Get-AuthenticodeSignature $out
-            "$name signature: $($sig.Status) $($sig.SignerCertificate.Subject)" | Tee-Object -Append "$evidence\summary.txt"
+            "$name signature: $($sig.Status) $($sig.SignerCertificate.Subject)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
             return $out
           }
 
@@ -55,11 +55,11 @@ jobs:
 
           function Report([string]$label) {
             $reg = @(Get-Registration)
-            "[$label] registrations: $($reg.Count)" | Tee-Object -Append "$evidence\summary.txt"
+            "[$label] registrations: $($reg.Count)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
             foreach ($r in $reg) {
               $exe = Join-Path $r.InstallLocation "KiroCrew.exe"
               $pv = if (Test-Path -LiteralPath $exe) { (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion } else { "<missing exe>" }
-              "[$label] $($r.DisplayName) DisplayVersion=$($r.DisplayVersion) ProductVersion=$pv at $($r.InstallLocation)" | Tee-Object -Append "$evidence\summary.txt"
+              "[$label] $($r.DisplayName) DisplayVersion=$($r.DisplayVersion) ProductVersion=$pv at $($r.InstallLocation)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
             }
             return $reg
           }
@@ -68,22 +68,22 @@ jobs:
           $new = Get-Installer "${{ matrix.to }}"
 
           $p = Start-Process -FilePath $old -ArgumentList "/S" -Wait -PassThru
-          "old install exit: $($p.ExitCode)" | Tee-Object -Append "$evidence\summary.txt"
+          "old install exit: $($p.ExitCode)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
           $before = @(Report "before")
           if ($before.Count -ne 1) { throw "expected one registration after the old install" }
 
           $sw = [Diagnostics.Stopwatch]::StartNew()
           $p = Start-Process -FilePath $new -ArgumentList "--updated", "/S" -Wait -PassThru
-          "update exit: $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds) s" | Tee-Object -Append "$evidence\summary.txt"
+          "update exit: $($p.ExitCode) after $([int]$sw.Elapsed.TotalSeconds) s" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
           $after = @(Report "after")
 
           $stranded = Get-ChildItem -Path $env:TEMP -Filter "ns*.tmp" -Directory -ErrorAction SilentlyContinue |
             Where-Object { Test-Path (Join-Path $_.FullName "old-install") }
-          "stranded old-install dirs in TEMP: $(@($stranded).Count)" | Tee-Object -Append "$evidence\summary.txt"
+          "stranded old-install dirs in TEMP: $(@($stranded).Count)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host
 
           $deepest = Get-ChildItem -LiteralPath $before[0].InstallLocation -Recurse -File -ErrorAction SilentlyContinue |
             Sort-Object { $_.FullName.Length } -Descending | Select-Object -First 5
-          foreach ($f in $deepest) { "deepest: $($f.FullName.Length) $($f.FullName)" | Tee-Object -Append "$evidence\summary.txt" }
+          foreach ($f in $deepest) { "deepest: $($f.FullName.Length) $($f.FullName)" | Tee-Object -Append "$evidence\summary.txt" | Out-Host }
 
           $pv = (Get-Item -LiteralPath (Join-Path $after[0].InstallLocation "KiroCrew.exe")).VersionInfo.ProductVersion
           if (-not $pv.StartsWith("${{ matrix.to }}")) { throw "REPRODUCED: ProductVersion is $pv after updating to ${{ matrix.to }}" }
