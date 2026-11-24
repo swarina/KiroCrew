@@ -1,0 +1,17 @@
+name: probe-wal-ro
+on:
+  push:
+    branches: [probe/41961-wal-ro]
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python probe_wal_ro.py
